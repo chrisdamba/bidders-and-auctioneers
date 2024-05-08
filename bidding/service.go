@@ -9,8 +9,9 @@ import (
 	"net/http"
 
 	"github.com/go-kit/kit/endpoint"
-	"github.com/go-kit/log"
 	httptransport "github.com/go-kit/kit/transport/http"
+	"github.com/go-kit/log/level"
+	"github.com/go-kit/log"
 
 	"github.com/chrisdamba/bidders-and-auctioneers/pkg/types"
 )
@@ -19,27 +20,38 @@ type BiddingService interface {
 	MakeBid(ctx context.Context, adRequest models.AdRequest) (models.AdObject, error)
 }
 
-type biddingService struct{}
+type biddingService struct {
+	logger log.Logger
+}
+
+func NewBiddingService(logger log.Logger) BiddingService {
+	return &biddingService{
+		logger: logger,
+	} 
+}
+
 
 func (b biddingService) MakeBid(ctx context.Context, adRequest models.AdRequest) (models.AdObject, error) {
 	// Randomly decide not to bid
 	if rand.Float32() < 0.5 {
+		level.Debug(b.logger).Log("msg", "no bid decision for AdPlacementID", "adPlacementId", adRequest.AdPlacementId)
 		return models.AdObject{}, ErrNoBid
 	}
 
 	// Generate a random bid
-	return models.AdObject{
+	adObject := models.AdObject{
 		AdID:     generateAdID(),
 		BidPrice: rand.Float64() * 10,
-	}, nil
+	}
+	level.Debug(b.logger).Log("msg", "bid generated", "adPlacementId", adRequest.AdPlacementId, "price", adObject.BidPrice)
+	return adObject, nil
 }
 
 var ErrNoBid = errors.New("no bid made")
 
 func generateAdID() string {
-  return fmt.Sprintf("ad-%d", rand.Int())
+	return fmt.Sprintf("ad-%d", rand.Int())
 }
-
 
 func MakeBidEndpoint(svc BiddingService) endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
@@ -58,15 +70,14 @@ type bidRequest struct {
 }
 
 type bidResponse struct {
-  models.AdObject
-  Err string `json:"err,omitempty"`
+	models.AdObject
+	Err string `json:"err,omitempty"`
 }
 
-
 func decodeHTTPBidRequest(_ context.Context, r *http.Request) (interface{}, error) {
-  var req bidRequest
-  req.AdPlacementId = r.URL.Query().Get("adPlacementId")
-  return req, nil
+	var req bidRequest
+	req.AdPlacementId = r.URL.Query().Get("adPlacementId")
+	return req, nil
 }
 
 func encodeHTTPResponse(ctx context.Context, w http.ResponseWriter, response interface{}) error {

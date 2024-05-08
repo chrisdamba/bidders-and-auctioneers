@@ -12,11 +12,28 @@ import (
 )
 
 type BiddingServiceClient interface {
-  CallBiddingService(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error)
+	CallBiddingService(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error)
+}
+
+type biddingServiceClient struct {
+	baseURL string
+	client  *http.Client
+}
+
+// CallBiddingService implements BiddingServiceClient.
+func (b *biddingServiceClient) CallBiddingService(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error) {
+	panic("unimplemented")
+}
+
+func NewBiddingServiceClient(baseURL string) BiddingServiceClient {
+	return &biddingServiceClient{
+		baseURL: baseURL,
+		client:  &http.Client{Timeout: 5 * time.Second}, // Adjust timeout as needed
+	}
 }
 
 type AuctionService interface {
-  RunAuction(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error)
+	RunAuction(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error)
 }
 
 type SimpleAuctionService struct {
