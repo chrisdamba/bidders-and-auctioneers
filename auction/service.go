@@ -2,6 +2,8 @@ package auction
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"sync"
 	"time"
 
@@ -18,8 +20,8 @@ type AuctionService interface {
 }
 
 type SimpleAuctionService struct {
-    biddingServices []BiddingServiceClient
-    auctionTimeout  time.Duration
+	biddingServices []BiddingServiceClient
+	auctionTimeout  time.Duration
 }
 
 func NewSimpleAuctionService(biddingServices []BiddingServiceClient, timeout time.Duration) *SimpleAuctionService {
@@ -27,6 +29,44 @@ func NewSimpleAuctionService(biddingServices []BiddingServiceClient, timeout tim
 		biddingServices: biddingServices,
 		auctionTimeout:  timeout,
 	}
+}
+
+// NewHTTPHandler returns an http.Handler for the auction service.
+func NewHTTPHandler(service AuctionService) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auction", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var adRequest models.AdRequest
+		err := json.NewDecoder(r.Body).Decode(&adRequest)
+		if err != nil {
+			http.Error(w, "Bad Request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if adRequest.AdPlacementId == "" {
+			http.Error(w, "Bad Request: Missing AdPlacementId", http.StatusBadRequest)
+			return
+		}
+
+		adObject, err := service.RunAuction(r.Context(), adRequest)
+		if err != nil {
+			if err == bidding.ErrNoBid {
+				http.Error(w, "No Content: "+err.Error(), http.StatusNoContent)
+				return
+			}
+			http.Error(w, "Internal Server Error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(adObject)
+	})
+
+	return mux
 }
 
 func (s *SimpleAuctionService) RunAuction(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error) {
