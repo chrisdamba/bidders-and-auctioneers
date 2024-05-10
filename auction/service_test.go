@@ -23,9 +23,19 @@ type MockBiddingServiceClient struct {
 // MockAuctionService for testing without implementing business logic.
 type MockAuctionService struct{}
 
+const (
+	failureThreshold = 3 
+	cooldownPeriod   = 100 * time.Millisecond
+	timeout				   = 200 * time.Millisecond
+)
+
 func (m *MockBiddingServiceClient) CallBiddingService(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error) {
 	args := m.Called(ctx, adRequest)
 	return args.Get(0).(*models.AdObject), args.Error(1)
+}
+
+func (m *MockBiddingServiceClient) GetBaseURL() string {
+	return "mock base URL"
 }
 
 func (m *MockAuctionService) RunAuction(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error) {
@@ -40,7 +50,7 @@ func TestRunAuction(t *testing.T) {
 	mockService1.On("CallBiddingService", mock.Anything, adRequest).Return(&models.AdObject{AdID: "ad1", BidPrice: 10.0}, nil)
 	mockService2.On("CallBiddingService", mock.Anything, adRequest).Return(&models.AdObject{AdID: "ad2", BidPrice: 15.0}, nil)
 
-	service := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, 200*time.Millisecond)
+	service := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, timeout, failureThreshold, cooldownPeriod)
 	result, err := service.RunAuction(context.Background(), adRequest)
 
 	assert.Nil(t, err)
@@ -59,7 +69,7 @@ func TestRunAuctionNoBids(t *testing.T) {
 	mockService1.On("CallBiddingService", mock.Anything, adRequest).Return((*models.AdObject)(nil), errors.New("no bid"))
 	mockService2.On("CallBiddingService", mock.Anything, adRequest).Return((*models.AdObject)(nil), errors.New("no bid"))
 
-	service := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, 200*time.Millisecond)
+	service := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, timeout, failureThreshold, cooldownPeriod)
 	// act
 	result, err := service.RunAuction(context.Background(), adRequest)
 
@@ -77,12 +87,12 @@ func TestConcurrentBiddingCalls(t *testing.T) {
 
 
 	mockService1.On("CallBiddingService", mock.Anything, mock.Anything).Return(
-			&models.AdObject{BidPrice: 10}, nil).After(50 * time.Millisecond)
+		&models.AdObject{BidPrice: 10}, nil).After(50 * time.Millisecond)
 	mockService2.On("CallBiddingService", mock.Anything, mock.Anything).Return(
-			&models.AdObject{BidPrice: 5}, nil).After(20 * time.Millisecond)
+		&models.AdObject{BidPrice: 5}, nil).After(20 * time.Millisecond)
 
 
-	auctionService := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, 100 * time.Millisecond) 
+	auctionService := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, cooldownPeriod, failureThreshold, cooldownPeriod) 
 
 	adRequest := models.AdRequest{AdPlacementId: "test-placement"}
 
@@ -106,10 +116,10 @@ func TestValidBidsHandling(t *testing.T) {
 	mockService1 := &MockBiddingServiceClient{}
 	mockService2 := &MockBiddingServiceClient{} 
 	mockService1.On("CallBiddingService", mock.Anything, mock.Anything).Return(
-			&models.AdObject{AdID: "ad1", BidPrice: 12.50}, nil) 
+		&models.AdObject{AdID: "ad1", BidPrice: 12.50}, nil) 
 	mockService2.On("CallBiddingService", mock.Anything, mock.Anything).Return(
-			&models.AdObject{AdID: "ad2", BidPrice: 8.00}, nil) 
-	auctionService := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, 100 * time.Millisecond) 
+		&models.AdObject{AdID: "ad2", BidPrice: 8.00}, nil) 
+	auctionService := NewSimpleAuctionService([]BiddingServiceClient{mockService1, mockService2}, cooldownPeriod, failureThreshold, cooldownPeriod) 
 	adRequest := models.AdRequest{AdPlacementId: "test-placement"}
 
 	// act 
@@ -140,7 +150,7 @@ func TestAdPlacementIdHandling(t *testing.T) {
 		t.Run(tc.description, func(t *testing.T) {
 			requestBody, err := json.Marshal(models.AdRequest{AdPlacementId: tc.adPlacementId})
 			if err != nil {
-					t.Fatalf("Failed to marshal json: %v", err)
+				t.Fatalf("Failed to marshal json: %v", err)
 			}
 
 			request := httptest.NewRequest("POST", "/auction", bytes.NewBuffer(requestBody))
@@ -157,4 +167,40 @@ func TestAdPlacementIdHandling(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCircuitBreakerTripAndRecovery(t *testing.T) {
+	// arrange
+	adRequest := models.AdRequest{AdPlacementId: "test-placement"}
+	failureThreshold := 3
+	cooldownPeriod := 50 * time.Millisecond
+	mockService := &MockBiddingServiceClient{}
+
+	mockService.On("CallBiddingService", mock.Anything, mock.Anything).Return(nil, errors.New("simulated failure")).Times(failureThreshold) 
+	auctionService := NewSimpleAuctionService([]BiddingServiceClient{mockService}, timeout, failureThreshold, cooldownPeriod) 
+
+	// act
+	for i := 0; i < failureThreshold; i++ {
+		_, err := auctionService.RunAuction(context.Background(), adRequest)
+		assert.Error(t, err) 
+	}
+
+
+	time.Sleep(cooldownPeriod) 
+
+	mockService.On("CallBiddingService", mock.Anything, mock.Anything).Return(&models.AdObject{AdID: "test-ad1", BidPrice: 10}, nil) 
+	_, err := auctionService.RunAuction(context.Background(), adRequest)
+	assert.NoError(t, err)
+
+	// assert
+	mockService.On("CallBiddingService", mock.Anything, mock.Anything).Return(&models.AdObject{AdID: "test-ad2", BidPrice: 12}, nil) 
+	_, err = auctionService.RunAuction(context.Background(), adRequest)
+	assert.NoError(t, err) 
+
+	// After the initial failures
+	assert.Equal(t, stateOpen, auctionService.circuitBreakers[mockService.GetBaseURL()].state) 
+
+	// After the half-open success
+	assert.Equal(t, stateClosed, auctionService.circuitBreakers[mockService.GetBaseURL()].state) 
+
 }

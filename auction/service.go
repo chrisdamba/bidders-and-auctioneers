@@ -3,6 +3,10 @@ package auction
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -13,16 +17,60 @@ import (
 
 type BiddingServiceClient interface {
 	CallBiddingService(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error)
+	GetBaseURL() string
 }
+
 
 type biddingServiceClient struct {
 	baseURL string
 	client  *http.Client
 }
 
-// CallBiddingService implements BiddingServiceClient.
+type AuctionService interface {
+	RunAuction(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error)
+}
+
+type SimpleAuctionService struct {
+	biddingServices 	[]BiddingServiceClient
+	auctionTimeout  	time.Duration
+	circuitBreakers   map[string]*CircuitBreaker
+	logger          	*log.Logger
+}
+
+
 func (b *biddingServiceClient) CallBiddingService(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error) {
-	panic("unimplemented")
+	requestURL := fmt.Sprintf("%s/bid?adPlacementId=%s", b.baseURL, adRequest.AdPlacementId)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, nil) 
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request to bidding service: %w", err)
+	}
+	defer resp.Body.Close() 
+
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNoContent { 
+			return nil, bidding.ErrNoBid // Handle no-bid scenario
+		}
+		return nil, fmt.Errorf("bidding service error: %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %w", err)
+	}
+
+	var adObject models.AdObject
+	err = json.Unmarshal(body, &adObject)
+	if err != nil {
+			return nil, fmt.Errorf("error decoding response: %w", err)
+	}
+
+	return &adObject, nil
 }
 
 func NewBiddingServiceClient(baseURL string) BiddingServiceClient {
@@ -32,19 +80,23 @@ func NewBiddingServiceClient(baseURL string) BiddingServiceClient {
 	}
 }
 
-type AuctionService interface {
-	RunAuction(ctx context.Context, adRequest models.AdRequest) (*models.AdObject, error)
+
+func (b *biddingServiceClient) GetBaseURL() string {
+	return b.baseURL
 }
 
-type SimpleAuctionService struct {
-	biddingServices []BiddingServiceClient
-	auctionTimeout  time.Duration
-}
 
-func NewSimpleAuctionService(biddingServices []BiddingServiceClient, timeout time.Duration) *SimpleAuctionService {
+func NewSimpleAuctionService(biddingServices []BiddingServiceClient, timeout time.Duration, failureThreshold int, cooldownPeriod time.Duration) *SimpleAuctionService {
+	logger := log.New(os.Stdout, "auction-service: ", log.LstdFlags)
+	circuitBreakers := make(map[string]*CircuitBreaker)
+	for _, service := range biddingServices {
+		circuitBreakers[service.GetBaseURL()] = NewCircuitBreaker(failureThreshold, cooldownPeriod) 
+	}
 	return &SimpleAuctionService{
 		biddingServices: biddingServices,
 		auctionTimeout:  timeout,
+		circuitBreakers: circuitBreakers, 
+		logger:          logger,
 	}
 }
 
@@ -101,6 +153,7 @@ func (s *SimpleAuctionService) RunAuction(ctx context.Context, adRequest models.
 			defer wg.Done()
 			bid, err := service.CallBiddingService(ctx, adRequest)
 			if err != nil {
+				s.logger.Println("bidding service error:", err) 
 				return
 			}
 			mu.Lock()
@@ -108,6 +161,7 @@ func (s *SimpleAuctionService) RunAuction(ctx context.Context, adRequest models.
 				winningBid = bid
 			}
 			mu.Unlock()
+			s.logger.Printf("bid received: adPlacementId=%s, price=%f", adRequest.AdPlacementId, bid.BidPrice) 
 		}(service)
 	}
 
