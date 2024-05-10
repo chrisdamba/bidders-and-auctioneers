@@ -17,8 +17,10 @@ import (
 
 func main() {
 	var (
-		httpAddr       = flag.String("http.addr", ":8081", "HTTP listen address")
-		auctionTimeout = flag.Duration("auction.timeout", 100*time.Millisecond, "Timeout for the auction itself")
+		httpAddr       		= flag.String("http.addr", ":8081", "HTTP listen address")
+		auctionTimeout 		= flag.Duration("auction.timeout", 100*time.Millisecond, "Timeout for the auction itself")
+		failureThreshold 	= flag.Int("auction.failureThreshold", 3, "Failure threshold for the auction") 
+		cooldownPeriod   	= flag.Duration("auction.cooldownPeriod", 100 * time.Millisecond, "Cooldown period for the auction")
 	)
 	flag.Parse()
 
@@ -32,7 +34,7 @@ func main() {
 	}
 
 	// Create auction service 
-	svc := auction.NewSimpleAuctionService(biddingServiceClients, *auctionTimeout) 
+	svc := auction.NewSimpleAuctionService(biddingServiceClients, *auctionTimeout, *failureThreshold, *cooldownPeriod) 
 
 	httpHandler := auction.NewHTTPHandler(svc)
 

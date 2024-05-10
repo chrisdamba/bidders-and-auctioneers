@@ -185,7 +185,6 @@ func TestCircuitBreakerTripAndRecovery(t *testing.T) {
 		assert.Error(t, err) 
 	}
 
-
 	time.Sleep(cooldownPeriod) 
 
 	mockService.On("CallBiddingService", mock.Anything, mock.Anything).Return(&models.AdObject{AdID: "test-ad1", BidPrice: 10}, nil) 
